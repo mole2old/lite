@@ -1,0 +1,8 @@
+# Binaries
+main
+*.dat
+*.dat.sha256sum
+
+# Go
+go.sum
+vendor/
