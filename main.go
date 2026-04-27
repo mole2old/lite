@@ -12,6 +12,7 @@ import (
 )
 
 func main() {
+	// Execute builds for both geosite and geoip
 	build("geosite", &routercommon.GeoSiteList{})
 	build("geoip", &routercommon.GeoIPList{})
 }
@@ -19,6 +20,7 @@ func main() {
 func build(dir string, list proto.Message) {
 	files, _ := os.ReadDir("data/" + dir)
 	for _, f := range files {
+		if f.IsDir() { continue }
 		raw, _ := os.ReadFile("data/" + dir + "/" + f.Name())
 		tag := strings.ToUpper(f.Name())
 		lines := strings.Split(string(raw), "\n")
@@ -26,25 +28,28 @@ func build(dir string, list proto.Message) {
 		if sList, ok := list.(*routercommon.GeoSiteList); ok {
 			s := &routercommon.GeoSite{CountryCode: tag}
 			for _, l := range lines {
-				if l = filter(l); l != "" { s.Domain = append(s.Domain, parseDomain(l)) }
+				if l = clean(l); l != "" { s.Domain = append(s.Domain, parseDomain(l)) }
 			}
 			sList.Entry = append(sList.Entry, s)
 		} else if iList, ok := list.(*routercommon.GeoIPList); ok {
 			i := &routercommon.GeoIP{CountryCode: tag}
 			for _, l := range lines {
-				if l = filter(l); l != "" { i.Cidr = append(i.Cidr, parseIP(l)...) }
+				if l = clean(l); l != "" {
+					if cidr := parseIPv4(l); cidr != nil { i.Cidr = append(i.Cidr, cidr) }
+				}
 			}
 			iList.Entry = append(iList.Entry, i)
 		}
 	}
 
+	// Serialize and save binary and checksum
 	out, _ := proto.Marshal(list)
 	name := dir + ".dat"
-	os.WriteFile(name, out, 0644)
-	os.WriteFile(name+".sha256sum", []byte(fmt.Sprintf("%x  %s", sha256.Sum256(out), name)), 0644)
+	_ = os.WriteFile(name, out, 0644)
+	_ = os.WriteFile(name+".sha256sum", []byte(fmt.Sprintf("%x  %s", sha256.Sum256(out), name)), 0644)
 }
 
-func filter(l string) string {
+func clean(l string) string {
 	l = strings.TrimSpace(l)
 	if l == "" || strings.HasPrefix(l, "#") { return "" }
 	return l
@@ -52,21 +57,35 @@ func filter(l string) string {
 
 func parseDomain(l string) *routercommon.Domain {
 	l = strings.ToLower(l)
+	// Map prefixes to V2Ray domain types (0:Plain, 1:Regex, 2:Domain, 3:Full, 4:Keyword)
 	prefixes := []string{"plain:", "regexp:", "domain:", "full:", "keyword:"}
 	for i, p := range prefixes {
 		if strings.HasPrefix(l, p) {
 			return &routercommon.Domain{Type: routercommon.Domain_Type(i), Value: l[len(p):]}
 		}
 	}
-	return &routercommon.Domain{Value: l}
+	// Default to Plain (Type 0) if no prefix is found
+	return &routercommon.Domain{Type: 0, Value: l}
 }
 
-func parseIP(l string) (res []*routercommon.CIDR) {
-	if ip, n, err := net.ParseCIDR(l); err == nil {
-		sz, _ := n.Mask.Size()
-		res = append(res, &routercommon.CIDR{Ip: ip, Prefix: uint32(sz)})
-	} else if ip := net.ParseIP(l); ip != nil {
-		res = append(res, &routercommon.CIDR{Ip: ip, Prefix: 32})
+func parseIPv4(l string) *routercommon.CIDR {
+	var ip net.IP
+	var mask int
+
+	if strings.Contains(l, "/") {
+		var n *net.IPNet
+		var err error
+		ip, n, err = net.ParseCIDR(l)
+		if err != nil { return nil }
+		mask, _ = n.Mask.Size()
+	} else {
+		ip = net.ParseIP(l)
+		mask = 32
 	}
-	return
+
+	// Force IPv4 4-byte representation and ignore IPv6
+	if ipv4 := ip.To4(); ipv4 != nil {
+		return &routercommon.CIDR{Ip: ipv4, Prefix: uint32(mask)}
+	}
+	return nil
 }
